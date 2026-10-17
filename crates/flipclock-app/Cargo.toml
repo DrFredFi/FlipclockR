@@ -1,0 +1,42 @@
+[package]
+name = "flipclock-app"
+version.workspace = true
+edition.workspace = true
+description = "A realistic 3D split-flap desktop clock"
+
+[[bin]]
+name = "flipclock"
+path = "src/main.rs"
+
+[dependencies]
+flipclock-core = { path = "../flipclock-core" }
+flipclock-render = { path = "../flipclock-render" }
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui-wgpu = "0.37"
+egui-winit = "0.37"
+winit = "0.30"
+# ksni: pure D-Bus StatusNotifierItem tray on Linux, no GTK needed.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3"] }
+rfd = "0.17"
+chrono = "0.4"
+sys-locale = "0.3"
+interprocess = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+
+[build-dependencies]
+embed-resource = "3"
+
+[package.metadata.bundle]
+name = "Flipclock"
+identifier = "app.flipclock.desktop"
+category = "public.app-category.utilities"
+short_description = "A realistic 3D split-flap desktop clock"
+osx_minimum_system_version = "12.0"

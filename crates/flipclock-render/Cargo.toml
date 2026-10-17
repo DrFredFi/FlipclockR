@@ -1,0 +1,15 @@
+[package]
+name = "flipclock-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flipclock-core = { path = "../flipclock-core" }
+wgpu = "30"
+glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
+fontdb = "0.24"
+swash = "0.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+log = "0.4"
+pollster = "1"

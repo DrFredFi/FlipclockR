@@ -1,0 +1,3 @@
+# Config next to the executable, no standard location
+
+`config.toml` lives next to the executable: next to `flipclock.exe` on Windows, next to the binary or the `.AppImage` file on Linux, and in the folder that contains `Flipclock.app` on macOS (never inside the bundle, which would break its signature). We deliberately ignore the per-OS conventions (`%APPDATA%`, `~/.config`, `~/Library/Application Support`) so the app stays portable: copying the folder carries its settings along. There is no fallback location. If the folder is not writable, for example under macOS App Translocation, the app warns once per launch and keeps its settings in memory only.
