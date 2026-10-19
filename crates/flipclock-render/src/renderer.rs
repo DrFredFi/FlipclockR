@@ -194,6 +194,9 @@ impl Renderer {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("flipclock"),
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            // The default (Performance) reserves large memory blocks up front; a
+            // clock allocates a handful of small resources, so prefer small blocks.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|e| format!("cannot create graphics device: {e}"))?;
