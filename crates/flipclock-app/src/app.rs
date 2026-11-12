@@ -6,24 +6,26 @@ use std::time::{Duration, Instant};
 
 use chrono::{Local, Timelike};
 use flipclock_core::battery::BatteryStatus;
-use flipclock_core::config::{self, Config};
+use flipclock_core::config::{self, Config, DatePosition};
+use flipclock_core::countdown::{self, Countdown, CountdownLayout, CountdownState, Countdowns};
 use flipclock_core::date::format_date;
-use flipclock_core::digits::digits_of;
+use flipclock_core::digits::{TILE_COUNT, digits_of};
 use flipclock_core::layout::{self, LayoutInput};
 use flipclock_core::motion::{Motion, MotionSettings};
 use flipclock_core::placement::{self, Monitor, SavedWindow};
-use flipclock_render::fonts::FontCatalog;
+use flipclock_render::fonts::{FontCatalog, LoadedFont};
 use flipclock_render::{FrameInput, Renderer, Style, wgpu};
 use tray_icon::TrayIconEvent;
 use tray_icon::menu::MenuId;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowId, WindowLevel};
 
 use crate::audio::Audio;
+use crate::countdown_ui::{CountdownActions, CountdownView, DATE_FAMILY};
 use crate::platform;
 use crate::strings::Strings;
 use crate::tray::{Tray, TrayAction};
@@ -33,6 +35,8 @@ use crate::ui::{self, UiEnv, UiState};
 const RESIZE_EDGE: f64 = 8.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const MAX_BACKGROUND_SIDE: u32 = 4096;
+/// Touchpad scrolling distance that counts as one wheel notch, in physical pixels.
+const WHEEL_PIXELS_PER_LINE: f64 = 40.0;
 
 pub enum UserEvent {
     ShowWindow,
@@ -63,6 +67,8 @@ struct Applied {
     digit_font: Option<(String, u16)>,
     date_font: Option<(String, u16)>,
     background: Option<Option<String>>,
+    /// Whether egui has the date font, for the countdown description box.
+    egui_date_font: bool,
 }
 
 pub struct App {
@@ -96,6 +102,17 @@ pub struct App {
     egui_repaint_at: Option<Instant>,
     applied: Applied,
     battery: Option<BatteryStatus>,
+    /// Countdowns live for the session only: nothing about them is saved.
+    countdowns: Countdowns,
+    /// The countdown shown on the countdown screen, created on first use.
+    current_countdown: Option<usize>,
+    countdown_mode: bool,
+    /// The tile the arrow keys edit while setting a countdown.
+    selected_tile: Option<usize>,
+    /// Mouse wheel movement not yet turned into digit steps, in lines.
+    wheel: f64,
+    /// Half-second phase last drawn while a finished countdown blinks.
+    blink_drawn: Option<i64>,
 }
 
 impl App {
@@ -153,6 +170,12 @@ impl App {
             egui_repaint_at: None,
             applied: Applied::default(),
             battery: None,
+            countdowns: Countdowns::default(),
+            current_countdown: None,
+            countdown_mode: false,
+            selected_tile: None,
+            wheel: 0.0,
+            blink_drawn: None,
         }
     }
 
@@ -247,7 +270,13 @@ impl App {
 
     /// Follow the wall clock: retarget the tiles on each new second, advance the
     /// animation and play the ticks of the flaps that landed.
+    /// In countdown mode the tiles follow the shown countdown instead, with single
+    /// flips. Countdowns advance even while the window is hidden, so they can finish.
     fn advance_clock(&mut self) {
+        let t = self.time();
+        for finished in self.countdowns.update(t) {
+            self.on_countdown_finished(finished);
+        }
         if !self.visible() {
             return;
         }
@@ -255,13 +284,20 @@ impl App {
         let second = now.timestamp();
         if self.last_second != Some(second) {
             self.last_second = Some(second);
-            let t = self.time();
-            self.motion
-                .set_target(digits_of(now.hour(), now.minute(), now.second()), t);
+            if !self.countdown_mode {
+                self.motion
+                    .set_target(digits_of(now.hour(), now.minute(), now.second()), t);
+            }
             self.refresh_date(now.date_naive());
             self.request_redraw();
         }
-        let landed = self.motion.update(self.time());
+        if self.countdown_mode
+            && let Some(cd) = self.countdown()
+        {
+            let digits = cd.digits(t);
+            self.motion.set_target_direct(digits, t);
+        }
+        let landed = self.motion.update(t);
         if landed > 0 && self.config.sound.enabled {
             self.audio.play_ticks(landed, self.config.sound.volume);
         }
@@ -274,13 +310,194 @@ impl App {
         }
     }
 
-    /// Jump to the current time without animation (startup, window shown again).
+    /// Jump to the current time (or countdown) without animation (startup, window shown again).
     fn snap_to_now(&mut self) {
         let now = Local::now();
-        self.motion
-            .snap(digits_of(now.hour(), now.minute(), now.second()));
+        let digits = match self.countdown().filter(|_| self.countdown_mode) {
+            Some(cd) => cd.digits(self.time()),
+            None => digits_of(now.hour(), now.minute(), now.second()),
+        };
+        self.motion.snap(digits);
         self.last_second = Some(now.timestamp());
         self.refresh_date(now.date_naive());
+    }
+
+    // --- Countdown -------------------------------------------------------------
+
+    fn countdown(&self) -> Option<&Countdown> {
+        self.current_countdown.map(|i| self.countdowns.get(i))
+    }
+
+    fn countdown_mut(&mut self) -> Option<&mut Countdown> {
+        self.current_countdown.map(|i| self.countdowns.get_mut(i))
+    }
+
+    /// The logical size of the window minus the open part of the settings panel.
+    fn clock_area(&self, width: f32, height: f32) -> (f32, f32) {
+        let panel = ui::PANEL_WIDTH * self.ui.panel_fraction;
+        ((width - panel).max(1.0), height)
+    }
+
+    fn countdown_layout(&self, width: f32, height: f32) -> CountdownLayout {
+        let c = &self.config;
+        countdown::layout(
+            width,
+            height,
+            c.layout.margin,
+            c.clock.seconds_scale,
+            c.date.size,
+        )
+    }
+
+    fn enter_countdown(&mut self) {
+        if self.countdown_mode {
+            return;
+        }
+        self.countdown_mode = true;
+        if self.current_countdown.is_none() {
+            self.current_countdown = Some(self.countdowns.add());
+        }
+        self.retarget_countdown();
+    }
+
+    /// Back to the clock; running countdowns keep going in the background.
+    fn exit_countdown(&mut self) {
+        if !self.countdown_mode {
+            return;
+        }
+        self.countdown_mode = false;
+        self.selected_tile = None;
+        let now = Local::now();
+        let t = self.time();
+        self.motion
+            .set_target_direct(digits_of(now.hour(), now.minute(), now.second()), t);
+        self.request_redraw();
+    }
+
+    /// Flip the tiles to the shown countdown's digits.
+    fn retarget_countdown(&mut self) {
+        let t = self.time();
+        if let Some(digits) = self.countdown().map(|cd| cd.digits(t)) {
+            self.motion.set_target_direct(digits, t);
+        }
+        self.request_redraw();
+    }
+
+    fn step_tile(&mut self, tile: usize, delta: i32) {
+        if let Some(cd) = self.countdown_mut() {
+            cd.step_digit(tile, delta);
+        }
+        self.retarget_countdown();
+    }
+
+    fn countdown_idle(&self) -> bool {
+        self.countdown_mode
+            && self
+                .countdown()
+                .is_some_and(|cd| cd.state() == CountdownState::Idle)
+    }
+
+    fn handle_countdown_actions(&mut self, a: CountdownActions) {
+        if !(a.start || a.pause_resume || a.reset || a.step.is_some()) {
+            return;
+        }
+        let t = self.time();
+        let Some(cd) = self.countdown_mut() else {
+            return;
+        };
+        if a.start {
+            cd.start(t);
+        }
+        if a.pause_resume {
+            match cd.state() {
+                CountdownState::Running => cd.pause(t),
+                CountdownState::Paused => cd.resume(t),
+                _ => {}
+            }
+        }
+        if a.reset {
+            cd.reset();
+        }
+        if let Some((tile, delta)) = a.step {
+            cd.step_digit(tile, delta);
+        }
+        self.retarget_countdown();
+    }
+
+    fn on_countdown_finished(&mut self, index: usize) {
+        // The alarm ignores "mute tick": muting is about the ticking, not about missing the end.
+        self.audio.play_alarm(self.config.sound.volume);
+        if !self.visible() {
+            let cd = self.countdowns.get(index);
+            let body = if cd.description.trim().is_empty() {
+                format_duration(cd.duration())
+            } else {
+                cd.description.clone()
+            };
+            crate::tray::notify(self.strings.countdown_finished, &body);
+        } else if self.current_countdown == Some(index) {
+            self.enter_countdown();
+        }
+        self.request_redraw();
+    }
+
+    /// The tile under a point (logical pixels), arrow bands included.
+    fn tile_at(&self, x: f32, y: f32) -> Option<usize> {
+        let window = self.window.as_ref()?;
+        let logical = window.inner_size().to_logical::<f32>(window.scale_factor());
+        let (w, h) = self.clock_area(logical.width, logical.height);
+        let l = self.countdown_layout(w, h);
+        let band = l.arrow_size * 1.5;
+        l.clock
+            .tiles
+            .iter()
+            .position(|t| x >= t.x && x <= t.right() && y >= t.y - band && y <= t.bottom() + band)
+    }
+
+    fn on_wheel(&mut self, lines: f64) {
+        if !self.countdown_idle() {
+            return;
+        }
+        let Some(window) = &self.window else { return };
+        let p = self
+            .pointer
+            .position
+            .to_logical::<f32>(window.scale_factor());
+        let Some(tile) = self.tile_at(p.x, p.y) else {
+            return;
+        };
+        self.selected_tile = Some(tile);
+        self.wheel += lines;
+        while self.wheel.abs() >= 1.0 {
+            let step = self.wheel.signum();
+            self.wheel -= step;
+            self.step_tile(tile, step as i32);
+        }
+    }
+
+    /// Arrow keys while setting a countdown: ←→ pick a tile, ↑↓ change it.
+    fn on_countdown_key(&mut self, key: KeyCode) -> bool {
+        if !self.countdown_idle() {
+            return false;
+        }
+        let last = TILE_COUNT - 1;
+        let selected = self.selected_tile;
+        match key {
+            KeyCode::ArrowLeft => {
+                self.selected_tile = Some(selected.map_or(last, |i| i.saturating_sub(1)))
+            }
+            KeyCode::ArrowRight => {
+                self.selected_tile = Some(selected.map_or(last, |i| (i + 1).min(last)))
+            }
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                let tile = selected.unwrap_or(last);
+                self.selected_tile = Some(tile);
+                self.step_tile(tile, if key == KeyCode::ArrowUp { 1 } else { -1 });
+            }
+            _ => return false,
+        }
+        self.request_redraw();
+        true
     }
 
     // --- Settings ------------------------------------------------------------
@@ -302,8 +519,9 @@ impl App {
             }
             let date_font = (c.fonts.date_family.clone(), c.fonts.date_weight);
             if self.applied.date_font.as_ref() != Some(&date_font) {
-                gfx.renderer
-                    .set_date_font(self.fonts.resolve(&date_font.0, date_font.1));
+                let font = self.fonts.resolve(&date_font.0, date_font.1);
+                self.applied.egui_date_font = register_egui_date_font(&gfx.egui_ctx, font.as_ref());
+                gfx.renderer.set_date_font(font);
                 self.applied.date_font = Some(date_font);
             }
             if self.applied.background.as_ref() != Some(&c.background.image_path) {
@@ -554,7 +772,10 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, key: KeyCode, event_loop: &ActiveEventLoop) {
+    fn on_key(&mut self, key: KeyCode, repeat: bool, event_loop: &ActiveEventLoop) {
+        if self.on_countdown_key(key) || repeat {
+            return;
+        }
         let mac = cfg!(target_os = "macos");
         let command = if mac {
             self.modifiers.super_key()
@@ -581,7 +802,7 @@ impl App {
             return;
         }
         self.advance_clock();
-        let (Some(window), Some(gfx)) = (self.window.clone(), self.gfx.as_mut()) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         let size = window.inner_size();
@@ -590,8 +811,51 @@ impl App {
         }
         let scale = window.scale_factor();
         let logical = size.to_logical::<f32>(scale);
+        let t = self.start.elapsed().as_secs_f64();
 
-        // egui first: the settings panel's animated width decides the clock area.
+        // The open settings panel pushes the clock left instead of covering it.
+        // Its width comes from the previous egui pass; while it slides, egui repaints every frame.
+        let (area_width, area_height) = self.clock_area(logical.width, logical.height);
+        let c = &self.config;
+        let countdown_layout = self
+            .countdown_mode
+            .then(|| self.countdown_layout(area_width, area_height));
+        let mut layout = match &countdown_layout {
+            Some(l) => l.clock.clone(),
+            None => layout::compute(&LayoutInput {
+                width: area_width,
+                height: area_height,
+                margin: c.layout.margin,
+                seconds_scale: c.clock.seconds_scale,
+                date_visible: c.date.visible,
+                date_size: c.date.size,
+                date_position: c.date.position,
+            }),
+        };
+
+        // Countdown: once started, the description reads like the date, drawn by the
+        // renderer's date line with the date font, weight and color.
+        let mut text_line = c.date.visible.then(|| self.date_text.clone());
+        let mut blink_off = false;
+        let current = self.current_countdown.map(|i| self.countdowns.get(i));
+        if let (Some(l), Some(cd)) = (&countdown_layout, current) {
+            text_line = None;
+            if cd.state() != CountdownState::Idle && !cd.description.trim().is_empty() {
+                text_line = Some(cd.description.clone());
+                layout.date = Some(layout::DateLayout {
+                    anchor_x: l.clock.clock.x + l.clock.clock.w / 2.0,
+                    center_y: l.description_center_y,
+                    height: l.text_size / 0.8,
+                    position: DatePosition::Center,
+                });
+            }
+            // A finished countdown blinks by drawing its digits in the tile color.
+            blink_off = cd.state() == CountdownState::Finished && blink_phase(t) % 2 == 1;
+        }
+
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
         let raw = gfx.egui_state.take_egui_input(&window);
         let env = UiEnv {
             strings: self.strings,
@@ -605,6 +869,13 @@ impl App {
         let mut draft = self.config.clone();
         let mut actions = ui::UiOutput::default();
         let ui_state = &mut self.ui;
+        let [r, g, b] = c.colors.date.0;
+        let text_color = egui::Color32::from_rgb(r, g, b);
+        let mut countdown = match (&countdown_layout, self.current_countdown) {
+            (Some(l), Some(i)) => Some((l, self.countdowns.get_mut(i))),
+            _ => None,
+        };
+        let (selected, date_font) = (self.selected_tile, self.applied.egui_date_font);
         let egui::FullOutput {
             platform_output,
             mut textures_delta,
@@ -612,7 +883,16 @@ impl App {
             pixels_per_point,
             viewport_output,
         } = gfx.egui_ctx.run_pass(raw, |ctx| {
-            actions = ui::draw(ctx, ui_state, &mut draft, &env);
+            let view = countdown.as_mut().map(|(l, cd)| CountdownView {
+                layout: l,
+                state: cd.state(),
+                can_start: cd.can_start(),
+                selected,
+                description: &mut cd.description,
+                color: text_color,
+                date_font,
+            });
+            actions = ui::draw(ctx, ui_state, &mut draft, &env, view);
         });
         gfx.egui_state
             .handle_platform_output(&window, platform_output);
@@ -635,29 +915,18 @@ impl App {
             .get(&egui::ViewportId::ROOT)
             .and_then(|v| Instant::now().checked_add(v.repaint_delay));
 
-        // The open settings panel pushes the clock left instead of covering it.
-        let c = &self.config;
-        let panel = ui::PANEL_WIDTH * self.ui.panel_fraction;
-        let layout = layout::compute(&LayoutInput {
-            width: (logical.width - panel).max(1.0),
-            height: logical.height,
-            margin: c.layout.margin,
-            seconds_scale: c.clock.seconds_scale,
-            date_visible: c.date.visible,
-            date_size: c.date.size,
-            date_position: c.date.position,
-        });
-
         // 3D scene, then egui on top
-        let t = self.start.elapsed().as_secs_f64();
         let tiles = std::array::from_fn(|i| self.motion.visual(i, t));
-        let style = style(c);
+        let mut style = style(&self.config);
+        if blink_off {
+            style.digit_color = style.tile_color;
+        }
         let input = FrameInput {
             layout: &layout,
             scale_factor: scale as f32,
             tiles,
             style: &style,
-            date_text: c.date.visible.then_some(self.date_text.as_str()),
+            date_text: text_line.as_deref(),
         };
         let egui_renderer = &mut gfx.egui_renderer;
         gfx.renderer.render(&input, |device, queue, encoder, view| {
@@ -697,6 +966,14 @@ impl App {
 
     fn handle_ui_actions(&mut self, a: ui::UiOutput, event_loop: &ActiveEventLoop) {
         let s = self.strings;
+        if a.toggle_countdown {
+            if self.countdown_mode {
+                self.exit_countdown();
+            } else {
+                self.enter_countdown();
+            }
+        }
+        self.handle_countdown_actions(a.countdown);
         if a.test_tick {
             self.audio.play_ticks(1, self.config.sound.volume);
         }
@@ -828,12 +1105,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed
-                    && !event.repeat
                     && !egui_wants_keyboard
                     && let PhysicalKey::Code(code) = event.physical_key
                 {
-                    self.on_key(code, event_loop);
+                    self.on_key(code, event.repeat, event_loop);
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } if !egui_wants_pointer => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    MouseScrollDelta::PixelDelta(p) => p.y / WHEEL_PIXELS_PER_LINE,
+                };
+                self.on_wheel(lines);
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
@@ -866,6 +1149,10 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 match action {
                     TrayAction::ShowHide => self.toggle_show_hide(),
+                    TrayAction::Countdown => {
+                        self.show_window();
+                        self.enter_countdown();
+                    }
                     TrayAction::Settings => {
                         self.show_window();
                         self.ui.panel_open = true;
@@ -890,9 +1177,28 @@ impl ApplicationHandler<UserEvent> for App {
             self.save_now();
         }
         let mut wake = self.save_deadline;
+        let t = self.time();
+        // Countdowns keep counting while hidden: wake for their next change or end.
+        if let Some(at) = self.countdowns.next_change(t) {
+            let wait = Duration::from_secs_f64((at - t).max(0.0)) + Duration::from_millis(3);
+            wake = earliest(wake, Some(now + wait));
+        }
         if self.visible() {
             if self.motion.is_animating() {
                 self.request_redraw();
+            }
+            let blinking = self.countdown_mode
+                && self
+                    .countdown()
+                    .is_some_and(|cd| cd.state() == CountdownState::Finished);
+            if blinking {
+                let phase = blink_phase(t);
+                if self.blink_drawn != Some(phase) {
+                    self.blink_drawn = Some(phase);
+                    self.request_redraw();
+                }
+                let next = (phase + 1) as f64 / 2.0;
+                wake = earliest(wake, Some(now + Duration::from_secs_f64(next - t)));
             }
             if let Some(at) = self.egui_repaint_at {
                 if at <= now {
@@ -920,6 +1226,47 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 fn next_second(now: Instant) -> Instant {
     let nanos = Local::now().timestamp_subsec_nanos().min(999_999_999);
     now + Duration::from_nanos(u64::from(1_000_000_000 - nanos)) + Duration::from_millis(1)
+}
+
+/// Half-second slots since start: a finished countdown hides its digits in odd ones.
+fn blink_phase(t: f64) -> i64 {
+    (t * 2.0).floor() as i64
+}
+
+fn format_duration(seconds: u32) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+/// Make the date font available to egui as the `date` family (for the countdown
+/// description box). Returns whether it was registered.
+fn register_egui_date_font(ctx: &egui::Context, font: Option<&LoadedFont>) -> bool {
+    let mut fonts = egui::FontDefinitions::default();
+    let Some(font) = font else {
+        ctx.set_fonts(fonts);
+        return false;
+    };
+    let mut data = egui::FontData::from_owned(font.data.as_ref().clone());
+    data.index = font.index as u32;
+    fonts
+        .font_data
+        .insert(DATE_FAMILY.to_owned(), Arc::new(data));
+    // Characters the date font lacks fall back to egui's own fonts.
+    let mut family = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    family.insert(0, DATE_FAMILY.to_owned());
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(DATE_FAMILY.into()), family);
+    ctx.set_fonts(fonts);
+    true
 }
 
 fn motion_settings(c: &Config) -> MotionSettings {

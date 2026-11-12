@@ -4,6 +4,7 @@
 pub mod battery;
 pub mod color;
 pub mod config;
+pub mod countdown;
 pub mod date;
 pub mod digits;
 pub mod layout;

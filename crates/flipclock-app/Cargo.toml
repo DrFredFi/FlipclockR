@@ -25,6 +25,7 @@ interprocess = "2"
 log = "0.4"
 env_logger = "0.11"
 starship-battery = "0.12.0"
+notify-rust = "4.19.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

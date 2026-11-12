@@ -69,6 +69,17 @@ impl Audio {
         }
     }
 
+    /// The countdown alarm: three bursts of four short beeps.
+    pub fn play_alarm(&mut self, volume: f32) {
+        self.ensure_output();
+        if let Some(output) = &self.output {
+            output
+                .sink
+                .mixer()
+                .add(alarm().amplify(volume.clamp(0.0, 1.0)));
+        }
+    }
+
     /// (Re)open the stream if it failed or the default device changed since the last check.
     fn ensure_output(&mut self) {
         let failed = self.failed.swap(false, Ordering::Relaxed);
@@ -122,6 +133,35 @@ fn load_tick(path: &Path) -> Option<SamplesBuffer> {
     let max = MAX_TICK_SECONDS * rate.get() as usize * channels.get() as usize;
     let samples: Vec<f32> = decoder.take(max).collect();
     (!samples.is_empty()).then(|| SamplesBuffer::new(channels, rate, samples))
+}
+
+/// Three bursts of four 2 kHz beeps, about 2.2 s in all.
+fn alarm() -> SamplesBuffer {
+    const RATE: u32 = 48_000;
+    const BEEP: f32 = 0.08;
+    const BEEP_GAP: f32 = 0.07;
+    const BURST_GAP: f32 = 0.45;
+    let burst = 4.0 * (BEEP + BEEP_GAP);
+    let len = (RATE as f32 * 3.0 * (burst + BURST_GAP)) as usize;
+    let tau = std::f32::consts::TAU;
+    let samples: Vec<f32> = (0..len)
+        .map(|i| {
+            let t = (i as f32 / RATE as f32) % (burst + BURST_GAP);
+            let b = t % (BEEP + BEEP_GAP);
+            if t >= burst || b >= BEEP {
+                return 0.0;
+            }
+            // Short fades at both ends keep the beep free of clicks.
+            let envelope = (b.min(BEEP - b) / 0.004).min(1.0);
+            let tone = (tau * 2000.0 * b).sin() * 0.8 + (tau * 4000.0 * b).sin() * 0.2;
+            tone * envelope * 0.6
+        })
+        .collect();
+    SamplesBuffer::new(
+        NonZero::new(1).unwrap(),
+        NonZero::new(RATE).unwrap(),
+        samples,
+    )
 }
 
 /// A short mechanical click: a noise burst through two decaying resonances.

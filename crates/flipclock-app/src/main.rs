@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod battery_ui;
+mod countdown_ui;
 mod icon_art;
 mod platform;
 mod power;
