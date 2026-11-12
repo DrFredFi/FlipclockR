@@ -1,0 +1,5 @@
+# Direct flips for the countdown
+
+The clock's tiles only ever move forward through their own digit sequence, rolling through every intermediate digit (hours tens `0–2`, minutes and seconds tens `0–5`). A countdown breaks both assumptions: its digits go down, so each one-second step would become a nine-flip roll forward, and its hours tens go up to 9, outside the clock's sequence. The countdown therefore changes each tile with a single flip straight to the new digit, as the original Windows-only version did, and so does switching between the clock and the countdown in either direction. The choice is recorded per tile when its target is set (`Motion::set_target_direct`), so a roll already under way on the clock continues normally and a direct flip already under way finishes before the next target is applied.
+
+We considered rolling backward instead. A countdown that drops by one each second would still produce single flips, so it would look almost the same while adding a second direction to the motion model.
