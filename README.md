@@ -12,7 +12,16 @@ A realistic 3D split-flap desktop clock for Windows, Linux and macOS, written in
 - [Known gaps](#known-gaps)
 - [Reporting a problem](#reporting-a-problem)
 
-All commands below are run from the **root folder of the source** (the folder that contains this `README.md` and `Cargo.toml`). The first build downloads and compiles all dependencies and takes several minutes; later builds are much faster.
+All commands below are run from the **root folder of the source** (the folder that contains this `README.md` and `Cargo.toml`). To get it, install `git` (see each platform's prerequisites) and run:
+
+```bash
+git clone https://github.com/DrFredFi/FlipclockR.git
+cd FlipclockR
+```
+
+To test a branch that is not merged yet, also run `git switch <branch-name>`. To update later, run `git pull` in the same folder.
+
+The first build downloads and compiles all dependencies and takes several minutes; later builds are much faster.
 
 ---
 
@@ -26,7 +35,8 @@ Reference platform: Windows 11 x64.
    - **MSVC Build Tools for x64/x86 (latest)**
    - **Windows 11 SDK** (any recent version)
 2. **Rust.** Download and run `rustup-init.exe` from <https://rustup.rs> and accept the defaults (toolchain `stable-x86_64-pc-windows-msvc`).
-3. Open a **new** terminal (PowerShell or Command Prompt) and check:
+3. **Git**, to download the source: `winget install Git.Git`, or the installer from <https://git-scm.com/download/win>.
+4. Open a **new** terminal (PowerShell or Command Prompt) and check:
    ```powershell
    rustc --version
    cargo --version
@@ -70,13 +80,13 @@ Reference platform: Ubuntu 24.04 x86_64. The app runs on both X11 and Wayland se
 
 ### 1. Install the system packages (once)
 
-Only the ALSA headers are needed to compile; the other packages are needed to run and are already present on most desktop installs.
+Besides the compiler and `git`, only the ALSA headers are needed to compile; the other packages are needed to run and are already present on most desktop installs. Pick the commands for your distribution.
 
 **Ubuntu / Debian:**
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential pkg-config curl libasound2-dev \
+sudo apt install -y build-essential pkg-config curl git libasound2-dev \
   libx11-6 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0 \
   libvulkan1 mesa-vulkan-drivers
 ```
@@ -84,10 +94,23 @@ sudo apt install -y build-essential pkg-config curl libasound2-dev \
 **Fedora:**
 
 ```bash
-sudo dnf install -y gcc pkgconf-pkg-config curl alsa-lib-devel \
+sudo dnf install -y gcc pkgconf-pkg-config curl git alsa-lib-devel \
   libX11 libXcursor libXrandr libXi libxkbcommon-x11 \
   vulkan-loader mesa-vulkan-drivers
 ```
+
+**Arch Linux / CachyOS / Manjaro:**
+
+```bash
+sudo pacman -S --needed base-devel pkgconf curl git alsa-lib \
+  libx11 libxcursor libxrandr libxi libxkbcommon-x11 \
+  vulkan-icd-loader xorg-xwayland pipewire-alsa
+```
+
+Notes for Arch-based systems:
+- **Vulkan driver:** usually installed already. If the app reports that no graphics adapter was found, install the one for your GPU: `vulkan-radeon` (AMD), `vulkan-intel` (Intel) or `nvidia-utils` (NVIDIA). `vulkaninfo --summary` (package `vulkan-tools`) shows whether Vulkan works.
+- **Sound:** audio goes through ALSA. On PipeWire systems (CachyOS and most current installs) `pipewire-alsa` provides it; without it the app runs silently.
+- **Rust:** you can use the distribution's `rustup` instead of the installer in step 2: `sudo pacman -S --needed rustup && rustup default stable`.
 
 **Tray icon on GNOME:** the tray icon uses the StatusNotifierItem protocol, which GNOME does not show by default. Ubuntu ships the AppIndicator extension already enabled. KDE, Xfce and most other desktops support it out of the box. On Fedora and other GNOME distributions, install and enable it to get the tray icon (otherwise the app still works, but minimizing goes to the taskbar instead of the tray):
 
