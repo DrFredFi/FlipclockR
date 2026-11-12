@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{Local, Timelike};
+use flipclock_core::battery::BatteryStatus;
 use flipclock_core::config::{self, Config};
 use flipclock_core::date::format_date;
 use flipclock_core::digits::digits_of;
@@ -37,6 +38,8 @@ pub enum UserEvent {
     ShowWindow,
     Tray(TrayIconEvent),
     Menu(MenuId),
+    /// The battery status changed; `None` when the computer has no battery.
+    Battery(Option<BatteryStatus>),
 }
 
 struct Gfx {
@@ -92,6 +95,7 @@ pub struct App {
     ui: UiState,
     egui_repaint_at: Option<Instant>,
     applied: Applied,
+    battery: Option<BatteryStatus>,
 }
 
 impl App {
@@ -148,6 +152,7 @@ impl App {
             ui: UiState::default(),
             egui_repaint_at: None,
             applied: Applied::default(),
+            battery: None,
         }
     }
 
@@ -594,6 +599,8 @@ impl App {
             show_exit: self.tray.is_none(),
             fullscreen: window.fullscreen().is_some(),
             idle: self.last_activity.elapsed().as_secs_f32(),
+            battery: self.battery,
+            time: self.start.elapsed().as_secs_f32(),
         };
         let mut draft = self.config.clone();
         let mut actions = ui::UiOutput::default();
@@ -754,6 +761,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         crate::tray::forward_events(self.proxy.clone());
+        crate::power::watch(self.proxy.clone());
         if self.tray_available {
             let w = &self.config.window;
             self.tray = Tray::new(
@@ -835,6 +843,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::ShowWindow => self.show_window(),
+            UserEvent::Battery(status) => {
+                self.battery = status;
+                self.request_redraw();
+            }
             UserEvent::Tray(e) => match e {
                 TrayIconEvent::DoubleClick {
                     button: tray_icon::MouseButton::Left,

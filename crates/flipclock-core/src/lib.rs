@@ -1,6 +1,7 @@
 //! Platform-independent clock logic: digit sequences, motion planning, date
-//! formatting, configuration, layout and window placement.
+//! formatting, configuration, layout, window placement and the battery indicator.
 
+pub mod battery;
 pub mod color;
 pub mod config;
 pub mod date;

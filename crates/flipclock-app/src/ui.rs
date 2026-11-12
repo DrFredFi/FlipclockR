@@ -3,16 +3,20 @@
 use std::collections::HashMap;
 
 use egui::{Align2, Color32, ComboBox, Id, RichText, ScrollArea, Slider};
-use flipclock_core::config::{Config, DatePosition};
+use flipclock_core::battery::BatteryStatus;
+use flipclock_core::config::{BatteryPosition, Config, DatePosition};
 use flipclock_core::date::DateLanguage;
 use flipclock_render::fonts::FontCatalog;
 
+use crate::battery_ui;
 use crate::strings::Strings;
 
 pub const PANEL_WIDTH: f32 = 340.0;
 const COG_IDLE_SECONDS: f32 = 3.0;
 const COG_FADE_SECONDS: f32 = 0.4;
 const STANDARD_WEIGHTS: [u16; 9] = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+/// Height kept free below the window's top edge on the right, for the round buttons.
+const TOP_BUTTONS_CLEARANCE: f32 = 14.0 + 36.0 + 8.0;
 
 #[derive(Default)]
 pub struct UiState {
@@ -46,6 +50,10 @@ pub struct UiEnv<'a> {
     pub fullscreen: bool,
     /// Seconds since the pointer last moved over the window.
     pub idle: f32,
+    /// `None` on computers without a battery.
+    pub battery: Option<BatteryStatus>,
+    /// Seconds since start, for animations.
+    pub time: f32,
 }
 
 pub fn draw(
@@ -58,7 +66,22 @@ pub fn draw(
     cog(ctx, state, env);
     panel(ctx, state, config, env, &mut out);
     banner(ctx, state, env);
+    battery_ui::draw(
+        ctx,
+        env.battery,
+        config,
+        clock_area(ctx, state),
+        TOP_BUTTONS_CLEARANCE,
+        env.time,
+    );
     out
+}
+
+/// The window minus the open part of the settings panel.
+pub fn clock_area(ctx: &egui::Context, state: &UiState) -> egui::Rect {
+    let mut area = ctx.content_rect();
+    area.max.x -= PANEL_WIDTH * state.panel_fraction;
+    area
 }
 
 fn cog(ctx: &egui::Context, state: &mut UiState, env: &UiEnv<'_>) {
@@ -287,6 +310,33 @@ fn sections(
         );
     });
 
+    section(ui, s.section_battery, |ui| {
+        // Without a battery the options are greyed out and a note explains why.
+        let available = env.battery.is_some();
+        if !available {
+            ui.label(RichText::new(s.no_battery).weak());
+        }
+        ui.add_enabled_ui(available, |ui| {
+            ui.checkbox(&mut c.battery.visible, s.show_battery);
+            ComboBox::from_label(s.date_position)
+                .selected_text(s.corners[corner_index(c.battery.position)])
+                .show_ui(ui, |ui| {
+                    for pos in BatteryPosition::ALL {
+                        ui.selectable_value(
+                            &mut c.battery.position,
+                            pos,
+                            s.corners[corner_index(pos)],
+                        );
+                    }
+                });
+            ui.add(
+                Slider::new(&mut c.battery.size, 0.5..=3.0)
+                    .text(s.date_size)
+                    .suffix("×"),
+            );
+        });
+    });
+
     section(ui, s.section_layout, |ui| {
         ui.add(
             Slider::new(&mut c.layout.margin, 0.0..=500.0)
@@ -410,6 +460,13 @@ fn font_picker(
                 ui.selectable_value(weight, w, w.to_string());
             }
         });
+}
+
+fn corner_index(p: BatteryPosition) -> usize {
+    BatteryPosition::ALL
+        .iter()
+        .position(|&x| x == p)
+        .unwrap_or(0)
 }
 
 fn nearest(weights: &[u16], target: u16) -> u16 {
