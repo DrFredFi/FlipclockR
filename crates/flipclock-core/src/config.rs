@@ -26,6 +26,26 @@ impl DatePosition {
     pub const ALL: [DatePosition; 3] = [Self::Left, Self::Center, Self::Right];
 }
 
+/// The window corner holding the battery indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BatteryPosition {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl BatteryPosition {
+    pub const ALL: [BatteryPosition; 4] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
     pub clock: ClockConfig,
@@ -34,6 +54,7 @@ pub struct Config {
     pub sound: SoundConfig,
     pub layout: LayoutConfig,
     pub date: DateConfig,
+    pub battery: BatteryConfig,
     pub colors: ColorConfig,
     pub fonts: FontConfig,
     pub background: BackgroundConfig,
@@ -83,6 +104,15 @@ pub struct DateConfig {
     pub language: DateLanguage,
     pub position: DatePosition,
     /// Size multiplier, 0.5–2.0.
+    pub size: f32,
+}
+
+/// Shown only on computers that have a battery.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BatteryConfig {
+    pub visible: bool,
+    pub position: BatteryPosition,
+    /// Size multiplier, 0.5–3.0.
     pub size: f32,
 }
 
@@ -157,6 +187,11 @@ impl Default for Config {
                 position: DatePosition::Center,
                 size: 1.0,
             },
+            battery: BatteryConfig {
+                visible: true,
+                position: BatteryPosition::TopLeft,
+                size: 1.0,
+            },
             colors: ColorConfig {
                 tile: Rgb::new(0x1c, 0x1c, 0x1e),
                 digits: Rgb::new(0xf2, 0xf0, 0xea),
@@ -206,6 +241,7 @@ impl Config {
         self.sound.volume = clamp(self.sound.volume, 0.0, 1.0, d.sound.volume);
         self.layout.margin = clamp(self.layout.margin, 0.0, 500.0, d.layout.margin);
         self.date.size = clamp(self.date.size, 0.5, 2.0, d.date.size);
+        self.battery.size = clamp(self.battery.size, 0.5, 3.0, d.battery.size);
         self.fonts.digits_weight = self.fonts.digits_weight.clamp(100, 900);
         self.fonts.date_weight = self.fonts.date_weight.clamp(100, 900);
         self.background.dim = clamp(self.background.dim, 0.0, 0.9, d.background.dim);
@@ -270,6 +306,12 @@ impl Config {
             position: r.get(&s, "date.position", d.date.position),
             size: r.get(&s, "date.size", d.date.size),
         };
+        let s = r.section(&root, "battery");
+        let battery = BatteryConfig {
+            visible: r.get(&s, "battery.visible", d.battery.visible),
+            position: r.get(&s, "battery.position", d.battery.position),
+            size: r.get(&s, "battery.size", d.battery.size),
+        };
         let s = r.section(&root, "colors");
         let colors = ColorConfig {
             tile: r.get(&s, "colors.tile", d.colors.tile),
@@ -306,6 +348,7 @@ impl Config {
             sound,
             layout,
             date,
+            battery,
             colors,
             fonts,
             background,
@@ -469,6 +512,16 @@ mod tests {
         assert_eq!(c.animation.cascade_delay_ms, 200);
         assert_eq!(c.layout.margin, 0.0);
         assert_eq!(c.clock.seconds_scale, 0.3);
+    }
+
+    #[test]
+    fn battery_section_reads_corner_names() {
+        let text = "[battery]\nvisible = false\nposition = \"bottom-right\"\nsize = 9.0\n";
+        let (c, invalid) = Config::parse(text).unwrap();
+        assert!(invalid.is_empty(), "{invalid:?}");
+        assert!(!c.battery.visible);
+        assert_eq!(c.battery.position, BatteryPosition::BottomRight);
+        assert_eq!(c.battery.size, 3.0);
     }
 
     #[test]

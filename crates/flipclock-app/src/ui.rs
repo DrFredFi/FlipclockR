@@ -1,25 +1,34 @@
-//! egui overlay: the cog button, the slide-in settings panel and the warning banner.
+//! egui overlay: the round buttons, the countdown controls, the slide-in
+//! settings panel, the warning banner and the battery indicator.
 
 use std::collections::HashMap;
 
 use egui::{Align2, Color32, ComboBox, Id, RichText, ScrollArea, Slider};
-use flipclock_core::config::{Config, DatePosition};
+use flipclock_core::battery::BatteryStatus;
+use flipclock_core::config::{BatteryPosition, Config, DatePosition};
 use flipclock_core::date::DateLanguage;
 use flipclock_render::fonts::FontCatalog;
 
+use crate::battery_ui;
+use crate::countdown_ui::{self, ArrowRepeat, CountdownActions, CountdownView};
 use crate::strings::Strings;
 
-const PANEL_WIDTH: f32 = 340.0;
+pub const PANEL_WIDTH: f32 = 340.0;
 const COG_IDLE_SECONDS: f32 = 3.0;
 const COG_FADE_SECONDS: f32 = 0.4;
 const STANDARD_WEIGHTS: [u16; 9] = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+/// Height kept free below the window's top edge on the right, for the round buttons.
+const TOP_BUTTONS_CLEARANCE: f32 = 14.0 + 36.0 + 8.0;
 
 #[derive(Default)]
 pub struct UiState {
     pub panel_open: bool,
+    /// How far the panel is open, 0..=1, animated; the clock area shrinks by that share of the panel.
+    pub panel_fraction: f32,
     pub banner: Option<String>,
     confirm_reset: bool,
     weights: HashMap<String, Vec<u16>>,
+    arrow_repeat: ArrowRepeat,
 }
 
 /// What the user asked for during this frame, beyond plain setting changes.
@@ -34,6 +43,9 @@ pub struct UiOutput {
     pub clear_sound: bool,
     pub toggle_fullscreen: bool,
     pub exit: bool,
+    /// Switch between the clock and the countdown.
+    pub toggle_countdown: bool,
+    pub countdown: CountdownActions,
 }
 
 pub struct UiEnv<'a> {
@@ -44,22 +56,56 @@ pub struct UiEnv<'a> {
     pub fullscreen: bool,
     /// Seconds since the pointer last moved over the window.
     pub idle: f32,
+    /// `None` on computers without a battery.
+    pub battery: Option<BatteryStatus>,
+    /// Seconds since start, for animations.
+    pub time: f32,
 }
 
+/// `countdown` is the countdown screen to show, `None` in clock mode.
 pub fn draw(
     ctx: &egui::Context,
     state: &mut UiState,
     config: &mut Config,
     env: &UiEnv<'_>,
+    countdown: Option<CountdownView<'_>>,
 ) -> UiOutput {
     let mut out = UiOutput::default();
-    cog(ctx, state, env);
+    let countdown_mode = countdown.is_some();
+    top_buttons(ctx, state, env, countdown_mode, &mut out);
+    if let Some(view) = countdown {
+        let width = clock_area(ctx, state).width();
+        out.countdown = countdown_ui::draw(ctx, view, &mut state.arrow_repeat, width, env.strings);
+    }
     panel(ctx, state, config, env, &mut out);
     banner(ctx, state, env);
+    battery_ui::draw(
+        ctx,
+        env.battery,
+        config,
+        clock_area(ctx, state),
+        TOP_BUTTONS_CLEARANCE,
+        env.time,
+    );
     out
 }
 
-fn cog(ctx: &egui::Context, state: &mut UiState, env: &UiEnv<'_>) {
+/// The window minus the open part of the settings panel.
+pub fn clock_area(ctx: &egui::Context, state: &UiState) -> egui::Rect {
+    let mut area = ctx.content_rect();
+    area.max.x -= PANEL_WIDTH * state.panel_fraction;
+    area
+}
+
+/// The round buttons in the top-right corner of the clock area: countdown and
+/// settings. They fade out after a few seconds without pointer movement.
+fn top_buttons(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    env: &UiEnv<'_>,
+    countdown_mode: bool,
+    out: &mut UiOutput,
+) {
     let opacity = if state.panel_open || env.idle < COG_IDLE_SECONDS {
         1.0
     } else {
@@ -70,21 +116,38 @@ fn cog(ctx: &egui::Context, state: &mut UiState, env: &UiEnv<'_>) {
     } else if opacity > 0.0 {
         ctx.request_repaint();
     }
-    if opacity <= 0.0 || state.panel_open {
+    if opacity <= 0.0 {
         return;
     }
-    egui::Area::new(Id::unique("cog"))
-        .anchor(Align2::RIGHT_TOP, [-14.0, 14.0])
+    let s = env.strings;
+    let round = |icon: &str| {
+        egui::Button::new(RichText::new(icon).size(22.0))
+            .fill(Color32::from_black_alpha(110))
+            .corner_radius(18.0)
+            .min_size([36.0, 36.0].into())
+    };
+    let area = clock_area(ctx, state);
+    egui::Area::new(Id::unique("top-buttons"))
+        .pivot(Align2::RIGHT_TOP)
+        .fixed_pos(area.right_top() + egui::vec2(-14.0, 14.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
-            let button = egui::Button::new(RichText::new("⚙").size(22.0))
-                .fill(Color32::from_black_alpha(110))
-                .corner_radius(18.0)
-                .min_size([36.0, 36.0].into());
-            if ui.add(button).clicked() {
-                state.panel_open = true;
-            }
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                // The settings button hides while the panel is open; its × closes it.
+                if !state.panel_open && countdown_ui::tapped(&ui.add(round("⚙"))) {
+                    state.panel_open = true;
+                }
+                let (icon, tip) = if countdown_mode {
+                    ("🕒", s.back_to_clock)
+                } else {
+                    ("⏱", s.countdown)
+                };
+                if countdown_ui::tapped(&ui.add(round(icon)).on_hover_text(tip)) {
+                    out.toggle_countdown = true;
+                }
+            });
         });
 }
 
@@ -116,7 +179,13 @@ fn panel(
     env: &UiEnv<'_>,
     out: &mut UiOutput,
 ) {
-    let t = ctx.animate_bool_with_time(Id::unique("panel-open"), state.panel_open, 0.22);
+    let t = ctx.animate_bool_with_time_and_easing(
+        Id::unique("panel-open"),
+        state.panel_open,
+        0.22,
+        egui::emath::easing::cubic_out,
+    );
+    state.panel_fraction = t;
     if t <= 0.0 {
         return;
     }
@@ -279,6 +348,33 @@ fn sections(
         );
     });
 
+    section(ui, s.section_battery, |ui| {
+        // Without a battery the options are greyed out and a note explains why.
+        let available = env.battery.is_some();
+        if !available {
+            ui.label(RichText::new(s.no_battery).weak());
+        }
+        ui.add_enabled_ui(available, |ui| {
+            ui.checkbox(&mut c.battery.visible, s.show_battery);
+            ComboBox::from_label(s.date_position)
+                .selected_text(s.corners[corner_index(c.battery.position)])
+                .show_ui(ui, |ui| {
+                    for pos in BatteryPosition::ALL {
+                        ui.selectable_value(
+                            &mut c.battery.position,
+                            pos,
+                            s.corners[corner_index(pos)],
+                        );
+                    }
+                });
+            ui.add(
+                Slider::new(&mut c.battery.size, 0.5..=3.0)
+                    .text(s.date_size)
+                    .suffix("×"),
+            );
+        });
+    });
+
     section(ui, s.section_layout, |ui| {
         ui.add(
             Slider::new(&mut c.layout.margin, 0.0..=500.0)
@@ -402,6 +498,13 @@ fn font_picker(
                 ui.selectable_value(weight, w, w.to_string());
             }
         });
+}
+
+fn corner_index(p: BatteryPosition) -> usize {
+    BatteryPosition::ALL
+        .iter()
+        .position(|&x| x == p)
+        .unwrap_or(0)
 }
 
 fn nearest(weights: &[u16], target: u16) -> u16 {

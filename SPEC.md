@@ -16,11 +16,13 @@ Status: **proof of concept**. Domain terms (tile, flap, flip, roll, cascade, tic
 - **Rust** (stable toolchain, edition 2024). Cargo workspace, `Cargo.lock` committed, crate versions pinned to the latest compatible releases at implementation time.
 - **winit** for windowing and input (borderless, fullscreen, always-on-top, drag-move, drag-resize, per-monitor DPI). On Linux, the event loop is built with the X11 backend forced.
 - **wgpu** for 3D rendering: DX12 on Windows, Vulkan on Linux, Metal on macOS; shaders in **WGSL** (ADR-0001).
-- **egui** (`egui` + `egui-winit` + `egui-wgpu`, with egui's bundled fonts) for the settings panel, cog button and warning banner, drawn on top of the resolved frame through a non-sRGB view. **The wgpu version must match the one required by `egui-wgpu`.**
+- **egui** (`egui` + `egui-winit` + `egui-wgpu`, with egui's bundled fonts plus the date font registered at runtime) for the settings panel, round buttons, countdown controls, battery indicator and warning banner, drawn on top of the resolved frame through a non-sRGB view. **The wgpu version must match the one required by `egui-wgpu`.**
 - **fontdb** for enumerating installed system fonts; **swash** for rasterizing digit and date glyphs to textures (weights and variable fonts).
 - **serde** + **toml** for config.
 - **tray-icon** (+ its re-exported `muda` menu) for the tray / macOS menu bar icon, built with the `ksni` backend: on Linux the tray is a pure D-Bus StatusNotifierItem, with no GTK or libappindicator dependency.
 - **rodio** (with `symphonia` mp3 support) for audio.
+- **starship-battery** for the battery status (Windows, macOS, Linux sysfs), polled on a background thread.
+- **notify-rust** for the countdown's system notification (WinRT toast, macOS notification center, D-Bus notifications on Linux).
 - **rfd** for native file dialogs.
 - **image** for loading the background image.
 - **chrono** for local time and date.
@@ -31,7 +33,7 @@ Status: **proof of concept**. Domain terms (tile, flap, flip, roll, cascade, tic
   - Windows: **windows** crate (`GetDoubleClickTime`, `GetSystemMetrics(SM_CXDRAG)`).
   - macOS: **objc2** messages (`NSEvent.doubleClickInterval`, Dock visibility via `NSApplication.setActivationPolicy`).
   - Linux: fixed defaults (double-click 400 ms, drag threshold 4 px); tray host check via `dbus-send`.
-- No asset files: the default tick is synthesized at startup and the app/tray icon is drawn procedurally (the same code generates the Windows `.ico` in `build.rs`).
+- No asset files: the default tick and the countdown alarm are synthesized at startup and the app/tray icon is drawn procedurally (the same code generates the Windows `.ico` in `build.rs`).
 - Windows: static CRT (`+crt-static`, set in `.cargo/config.toml` for the `x86_64-pc-windows-msvc` target), `#![windows_subsystem = "windows"]` in release, icon and manifest (per-monitor DPI v2) embedded via **embed-resource**.
 - macOS: minimal `Flipclock.app` produced with **cargo-bundle** (metadata in the app crate's `Cargo.toml`).
 
@@ -39,7 +41,7 @@ Status: **proof of concept**. Domain terms (tile, flap, flip, roll, cascade, tic
 
 | Crate | Type | Responsibility |
 |---|---|---|
-| `crates/flipclock-core` | lib | Digit sequences, flip/roll/cascade planning, tick scheduling, date formatting (localized tables), config load/validate/save, layout math, window placement rules, animation timing curves. No GPU/UI/OS dependencies. Covered by unit tests (`cargo test`). |
+| `crates/flipclock-core` | lib | Digit sequences, flip/roll/cascade planning, tick scheduling, date formatting (localized tables), config load/validate/save, layout math, window placement rules, animation timing curves, countdown timers and layout, battery indicator levels and sizes. No GPU/UI/OS dependencies. Covered by unit tests (`cargo test`). |
 | `crates/flipclock-render` | lib | wgpu scene, tile geometry, PBR shaders, shadow maps, flip animation, glyph textures. |
 | `crates/flipclock-app` | bin `flipclock` | winit event loop, egui settings panel, tray, window management, audio, single instance, platform module, UI string localization. |
 
@@ -76,7 +78,8 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
   - only the final flip uses the configured flip duration and bounce.
 - **Cascade.** When several tiles change in the same second, their flips/rolls start staggered right → left by the cascade delay.
 - **Retargeting.** If a new second arrives while a tile is still rolling, its target is updated and the roll continues — it never restarts. Tiles that are idle flip normally.
-- **Restore.** When the window becomes visible again after being hidden/minimized, the clock face snaps to the current time with no animation and no ticks.
+- **Direct flips.** The countdown (and the switch between clock and countdown in either direction) changes each tile with a **single flip** straight to its new digit, whichever way it goes — no roll. Counting down every second would otherwise be a 9-flip roll, and countdown hours tens go up to 9, outside the clock's `0–2` sequence (ADR-0005).
+- **Restore.** When the window becomes visible again after being hidden/minimized, the clock face snaps to the current time (or the shown countdown) with no animation and no ticks.
 - Sliders:
   - Flip duration: 150–1000 ms (default 450)
   - Cascade delay: 0–200 ms (default 60)
@@ -86,14 +89,14 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
 
 - **One tick every time a flap lands, on every tile, always** — normal flips and every flip of a roll. E.g. `09:59:59 → 10:00:00` produces 6 ticks staggered by the cascade; `:59 → :00` produces 2.
 - Overlapping ticks are mixed, never dropped.
-- **No ticks while the window is hidden or minimized.**
+- **No ticks while the window is hidden or minimized** (the countdown alarm still plays).
 - Bundled default tick (embedded); user may select a custom `.mp3`.
 - On/off toggle and volume slider.
-- Audio output is opened once at startup; if no audio device is available, sound is silently disabled.
+- The output **follows the default device**: before a sound, at most every 2 s, the default output device is compared with the open one, and the stream is reopened when it changed (headphones, Bluetooth) or reported an error. With no audio device, sounds are silently skipped until one appears.
 
 ## Layout & sizing
 
-- Clock fills the window minus a uniform margin.
+- Clock fills the **clock area** minus a uniform margin. The clock area is the window minus the open part of the settings panel, so the panel pushes the clock left as it slides in.
 - Margin slider **0–500** logical pixels (default 250).
 - Margin auto-shrinks so the clock never drops below ~40% of the window.
 - Everything scales with window resize and DPI (scale factor) changes.
@@ -106,6 +109,29 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
 - Position: **bottom-left / bottom-center / bottom-right**, inside the bottom margin.
 - Size scales with window, plus a size multiplier; can be hidden.
 - **Refreshes whenever the local date changes for any reason** (midnight, resume from sleep, manual clock change).
+
+## Countdown
+
+- A **stopwatch button** next to the cog (same fade) — or *Countdown* in the tray menu — switches the tiles to a countdown; the button becomes a clock that switches back. The date line hides in countdown mode.
+- Range `00:00:00`–`99:59:59`; tiles show H H M M S S, hours past 24 included.
+- **Setting** (only while idle):
+  - ▲▼ arrows above and below each tile; holding one repeats (after 400 ms, every 110 ms);
+  - mouse wheel over a tile (arrow bands included), which also selects it;
+  - keyboard: ←→ select a tile (outlined in the date color), ↑↓ change it; with no selection the seconds units are used.
+  - Each digit wraps within its own range (`0–9`, tens of minutes and seconds `0–5`) without carrying.
+- **Description** box above the tiles (max 80 characters), in the date font, color and size (egui shows the font's default weight while editing); Enter starts. Once started it becomes a label drawn by the date line renderer, shrunk to fit the window if too long.
+- **Controls** below the tiles: *Start* while idle (disabled at zero); *Reset* plus *Pause/Continue* once started. Reset returns to the value set, keeping the description.
+- **At zero:** an alarm (three bursts of four short beeps) plays even when the tick is muted, and the digits blink every 500 ms (drawn in the tile color). If the window is hidden, a system notification shows the description (or the set duration); if visible and in clock mode, the app switches to the finished countdown.
+- Countdowns keep running in the background while the clock is shown or the window is hidden, and are **never persisted**. The model holds a list of countdowns so several parallel ones can be shown later; only one is used for now.
+- Layout: the margin grows past the user's setting to make room above the tiles (description + arrows) and below (arrows + controls). In windows too small for that, the arrows are hidden.
+- Timing derives from the end instant on a monotonic clock, so it never drifts; seconds round up, so `00:00:00` appears exactly at the end.
+
+## Battery indicator
+
+- Shown only on computers with a battery, in a corner of the clock area: **top-left** (default), top-right (below the round buttons), bottom-left or bottom-right.
+- An outline in the date color with a small cap; the fill follows the charge and is **green** above 50%, **yellow** at 50% or less, **red** at 20% or less. A bolt shows while on mains power; while charging the fill pulses (opacity 1 → 0.35, 2.2 s cycle). The percentage sits below in egui's plain font, not the date font, to stay legible.
+- Scales with the window like the date, times a size multiplier (0.5–3×). Settings: visible, position, size (`[battery]` section in `config.toml`). Without a battery, the panel's Battery options are disabled with a note.
+- Status polled every 5 s on a background thread; changes reach the event loop as a user event. Several batteries are combined by capacity.
 
 ## Customization
 
@@ -135,7 +161,7 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
 
 - Always present where the platform has a tray host (Windows notification area, macOS menu bar, Linux StatusNotifier/AppIndicator).
 - **Minimize → hides to tray. Close (X) → exits the application.**
-- Menu: Show/Hide, Settings, Always on top, Borderless, Mute tick, Exit. Checkable items reflect current state.
+- Menu: Show/Hide, Countdown, Settings, Always on top, Borderless, Mute tick, Exit. Checkable items reflect current state.
 - Double-click toggles show/hide (where the platform supports tray double-click).
 - Tray and menu events are forwarded into the winit loop via an `EventLoopProxy` user event.
 - **Linux:** the tray is a StatusNotifierItem over D-Bus (ksni backend). At startup, check for a tray host: the `org.kde.StatusNotifierWatcher` name must have an owner on the session bus. A single left click toggles show/hide, since StatusNotifier hosts do not report double-clicks.
@@ -144,8 +170,8 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
 
 ## Settings panel
 
-- Opened by a **cog button in the top-right corner**; cog auto-fades after ~3 s mouse idle.
-- Slide-in overlay from the right, **live preview**, **debounced autosave** (~500 ms after the last change).
+- Opened by a **cog button in the top-right corner** of the clock area, next to the countdown button; both auto-fade after ~3 s mouse idle. The cog hides while the panel is open (its × closes it).
+- Slides in from the right (220 ms, ease-out) and **pushes the clock left** instead of covering it; **live preview**, **debounced autosave** (~500 ms after the last change).
 - "Reset to defaults" (with confirmation).
 - "Test tick": plays one tick.
 - "Test flip": all six tiles perform one flip (front and back show the current digit, so the displayed time stays correct), with cascade, bounce and ticks.
@@ -176,6 +202,7 @@ Renderer and UI are verified manually (see the test checklist in `README.md`).
 ## Build & distribution
 
 - **Proof of concept:** `cargo build --release` on each platform, plus `cargo bundle --release` for `Flipclock.app` on macOS. Step-by-step instructions per platform live in `README.md`.
+- `publish.ps1` (Windows, x64 or ARM64) and `publish.sh` (Linux binary, macOS `Flipclock.app`) run the tests, build the release and copy it into a folder, always keeping an existing `config.toml` there.
 - No CI during the proof of concept (ADR-0004).
 - **Later (v1):** Windows `.zip` with `flipclock.exe` (x64, ARM64 optional); macOS universal `Flipclock.app` (arm64 + x86_64) in a `.zip`; Linux AppImage x86_64 + `.tar.gz`. GitHub Actions matrix. Code signing and notarization out of scope for v1.
 

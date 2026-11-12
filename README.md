@@ -12,7 +12,16 @@ A realistic 3D split-flap desktop clock for Windows, Linux and macOS, written in
 - [Known gaps](#known-gaps)
 - [Reporting a problem](#reporting-a-problem)
 
-All commands below are run from the **root folder of the source** (the folder that contains this `README.md` and `Cargo.toml`). The first build downloads and compiles all dependencies and takes several minutes; later builds are much faster.
+All commands below are run from the **root folder of the source** (the folder that contains this `README.md` and `Cargo.toml`). To get it, install `git` (see each platform's prerequisites) and run:
+
+```bash
+git clone https://github.com/DrFredFi/FlipclockR.git
+cd FlipclockR
+```
+
+To test a branch that is not merged yet, also run `git switch <branch-name>`. To update later, run `git pull` in the same folder.
+
+The first build downloads and compiles all dependencies and takes several minutes; later builds are much faster.
 
 ---
 
@@ -26,7 +35,8 @@ Reference platform: Windows 11 x64.
    - **MSVC Build Tools for x64/x86 (latest)**
    - **Windows 11 SDK** (any recent version)
 2. **Rust.** Download and run `rustup-init.exe` from <https://rustup.rs> and accept the defaults (toolchain `stable-x86_64-pc-windows-msvc`).
-3. Open a **new** terminal (PowerShell or Command Prompt) and check:
+3. **Git**, to download the source: `winget install Git.Git`, or the installer from <https://git-scm.com/download/win>.
+4. Open a **new** terminal (PowerShell or Command Prompt) and check:
    ```powershell
    rustc --version
    cargo --version
@@ -49,6 +59,19 @@ target\release\flipclock.exe
 
 Double-click it, or run `.\target\release\flipclock.exe`. You can copy `flipclock.exe` to any **writable** folder; `config.toml` is created next to it.
 
+### 4. Publish to a folder (optional)
+
+`publish.ps1` runs the tests, builds the release and copies `flipclock.exe` into a folder. An existing `config.toml` there is always kept, so publishing over an installed copy keeps its settings:
+
+```powershell
+.\publish.ps1                                 # tests, then publishes to .\publish
+.\publish.ps1 -Output D:\Tools\Flipclock      # anywhere else
+.\publish.ps1 -Platform ARM64 -Clean          # Windows on Arm, emptying the folder first
+.\publish.ps1 -SkipTests                      # skip the tests
+```
+
+If PowerShell refuses to run the script, allow local scripts once with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
 ---
 
 ## Build on Linux
@@ -57,13 +80,13 @@ Reference platform: Ubuntu 24.04 x86_64. The app runs on both X11 and Wayland se
 
 ### 1. Install the system packages (once)
 
-Only the ALSA headers are needed to compile; the other packages are needed to run and are already present on most desktop installs.
+Besides the compiler and `git`, only the ALSA headers are needed to compile; the other packages are needed to run and are already present on most desktop installs. Pick the commands for your distribution.
 
 **Ubuntu / Debian:**
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential pkg-config curl libasound2-dev \
+sudo apt install -y build-essential pkg-config curl git libasound2-dev \
   libx11-6 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0 \
   libvulkan1 mesa-vulkan-drivers
 ```
@@ -71,10 +94,23 @@ sudo apt install -y build-essential pkg-config curl libasound2-dev \
 **Fedora:**
 
 ```bash
-sudo dnf install -y gcc pkgconf-pkg-config curl alsa-lib-devel \
+sudo dnf install -y gcc pkgconf-pkg-config curl git alsa-lib-devel \
   libX11 libXcursor libXrandr libXi libxkbcommon-x11 \
   vulkan-loader mesa-vulkan-drivers
 ```
+
+**Arch Linux / CachyOS / Manjaro:**
+
+```bash
+sudo pacman -S --needed base-devel pkgconf curl git alsa-lib \
+  libx11 libxcursor libxrandr libxi libxkbcommon-x11 \
+  vulkan-icd-loader xorg-xwayland pipewire-alsa
+```
+
+Notes for Arch-based systems:
+- **Vulkan driver:** usually installed already. If the app reports that no graphics adapter was found, install the one for your GPU: `vulkan-radeon` (AMD), `vulkan-intel` (Intel) or `nvidia-utils` (NVIDIA). `vulkaninfo --summary` (package `vulkan-tools`) shows whether Vulkan works.
+- **Sound:** audio goes through ALSA. On PipeWire systems (CachyOS and most current installs) `pipewire-alsa` provides it; without it the app runs silently.
+- **Rust:** you can use the distribution's `rustup` instead of the installer in step 2: `sudo pacman -S --needed rustup && rustup default stable`.
 
 **Tray icon on GNOME:** the tray icon uses the StatusNotifierItem protocol, which GNOME does not show by default. Ubuntu ships the AppIndicator extension already enabled. KDE, Xfce and most other desktops support it out of the box. On Fedora and other GNOME distributions, install and enable it to get the tray icon (otherwise the app still works, but minimizing goes to the taskbar instead of the tray):
 
@@ -106,6 +142,17 @@ cargo build --release
 ```
 
 You can copy the `flipclock` binary to any **writable** folder; `config.toml` is created next to it.
+
+### 5. Publish to a folder (optional)
+
+`publish.sh` runs the tests, builds the release and copies the binary into a folder, always keeping an existing `config.toml` there:
+
+```bash
+./publish.sh                    # tests, then publishes to ./publish
+./publish.sh -o ~/Flipclock     # anywhere else
+./publish.sh --clean            # empty the folder first (config.toml is kept)
+./publish.sh --skip-tests
+```
 
 ### Running under WSL (Windows 11)
 
@@ -172,6 +219,8 @@ The app is **not signed**. When you build it yourself on your Mac it opens norma
 xattr -dr com.apple.quarantine ~/Flipclock/Flipclock.app
 ```
 
+**Shortcut:** `./publish.sh -o ~/Flipclock` (from the source root) runs the tests, builds `Flipclock.app` and copies it into `~/Flipclock/` in one go, keeping an existing `config.toml`. Add `--skip-tests` to skip the tests.
+
 If the app shows a warning saying settings cannot be saved, the folder is not writable (or macOS is running the app from a temporary read-only location): move the app into a folder like `~/Flipclock/` as shown above.
 
 macOS shortcuts: **⌘B** borderless, **⌃⌘F** or **F11** fullscreen, **⌘Q** quit. The clock icon lives in the **menu bar** (top right), not in the Dock, while the window is hidden.
@@ -186,7 +235,7 @@ On any platform, from the source root:
 cargo test --workspace
 ```
 
-The tests cover the clock logic (digit sequences, rolls, cascade, ticks, date formatting, config, window placement). The renderer and UI are checked manually with the checklist below.
+The tests cover the clock logic (digit sequences, rolls, cascade, ticks, date formatting, config, window placement), the countdown (timing, digit editing, layout) and the battery indicator (levels, sizes). The renderer and UI are checked manually with the checklist below.
 
 ---
 
@@ -210,17 +259,36 @@ Please go through this list on your platform and note anything that doesn't beha
 - [ ] Launch the app a second time while it's running: the existing window comes to the front, no second clock appears.
 
 **Tray / menu bar**
-- [ ] The tray (menu bar on macOS) icon is present; its menu has Show/Hide, Settings, Always on top, Borderless, Mute tick, Exit.
+- [ ] The tray (menu bar on macOS) icon is present; its menu has Show/Hide, Countdown, Settings, Always on top, Borderless, Mute tick, Exit.
 - [ ] Double-clicking the tray icon (single click on Linux) shows/hides the window.
 - [ ] Minimize hides the window to the tray, and no ticks are heard while hidden. Show it again: the time is correct immediately.
 - [ ] Close (X / red button) exits the app.
 
 **Settings panel**
 - [ ] The cog in the top-right opens the panel; the cog fades after ~3 s without mouse movement.
+- [ ] The panel slides in from the right and pushes the clock to the left; it never covers the clock.
 - [ ] Changes preview live and are still there after restarting the app.
 - [ ] "Test tick" plays a tick; "Test flip" flips all six tiles once.
 - [ ] Fonts, colors, background image, sound file and date language all apply.
 - [ ] "Reset to defaults" asks for confirmation, then resets.
+
+**Sound**
+- [ ] With ticks playing, plug in headphones (or connect Bluetooth headphones, or change the default output device): within a couple of seconds the ticks move to the new device.
+
+**Battery indicator** (laptops)
+- [ ] A battery icon shows in the top-left corner with the percentage below; the fill is green above 50%, yellow up to 50%, red up to 20%.
+- [ ] Plugged in: a bolt appears. While charging the fill slowly pulses. Unplug: the bolt goes away within ~5 s.
+- [ ] The Battery section of the settings changes the corner and size, and can hide it. In the top-right corner it sits below the round buttons.
+- [ ] On a computer without a battery there is no icon, and the Battery settings are greyed out with a note.
+
+**Countdown**
+- [ ] The stopwatch button next to the cog (or "Countdown" in the tray menu) switches to the countdown at `00:00:00`; the date hides. The button turns into a clock that switches back.
+- [ ] Set the time with the ▲▼ arrows (holding one repeats), the mouse wheel over a tile, or the keyboard (←→ pick a tile, which gets an outline; ↑↓ change it). Each digit wraps on its own (minutes and seconds tens 0–5), with a single flip per change.
+- [ ] Type a description above the tiles; Enter (or Start) starts. The description then shows like the date line.
+- [ ] Pause / Continue and Reset work; Reset returns to the value you set, keeping the description.
+- [ ] At zero an alarm beeps (even with the tick muted) and the digits blink.
+- [ ] Start a short countdown, switch back to the clock: it keeps running, and at zero the window switches to the blinking countdown.
+- [ ] Start a short countdown and minimize to the tray: at zero the alarm plays and a system notification shows the description.
 
 **Config**
 - [ ] `config.toml` appears next to the executable (next to `Flipclock.app` on macOS).
@@ -234,7 +302,9 @@ Features not yet working on a given platform during the proof of concept. Update
 | Platform | Gap |
 |---|---|
 | macOS | Never built or run by the author — everything is unverified. |
+| Linux | Battery indicator, countdown notification and audio device switching not yet verified. |
 | Linux (GNOME without AppIndicator) | No tray icon (by design: minimize goes to the taskbar instead). |
+| Windows | The countdown notification shows "Windows PowerShell" as its sender: the app has no registered application ID. |
 
 ---
 

@@ -20,10 +20,31 @@ _Avoid_: Colon, divider
 The single line of text that shows the weekday and date in the selected date language.
 _Avoid_: Date label, subtitle
 
+**Clock area**:
+The part of the window the clock face fills: the whole window, minus the settings panel while it is open.
+
+**Battery indicator**:
+The battery icon with its charge percentage, shown in a corner of the clock area on computers that have a battery.
+_Avoid_: Battery widget, power icon
+
+## Countdown
+
+**Countdown**:
+A timer set by the user, shown on the tiles in place of the time and counting down to zero. It can be idle (being set), running, paused or finished.
+_Avoid_: Timer, stopwatch
+
+**Description**:
+The optional text the user gives a countdown, shown above the tiles.
+_Avoid_: Label, title, name
+
+**Alarm**:
+The beeping played when a countdown reaches zero.
+_Avoid_: Ring, bell
+
 ## Motion
 
 **Flip**:
-One rotation of a tile's top flap that advances the tile by exactly one digit.
+One rotation of a tile's top flap, which changes the digit the tile shows. The clock advances one digit per flip; a countdown flips straight to the new digit.
 
 **Roll**:
 A sequence of consecutive flips that a tile makes to reach a target digit more than one step away, passing through every intermediate digit.

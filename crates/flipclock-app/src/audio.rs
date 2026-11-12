@@ -1,36 +1,50 @@
 //! Tick playback. Ticks are decoded once into memory and mixed, so overlapping
-//! ticks from a cascade or a roll all play.
+//! ticks from a cascade or a roll all play. The output follows the default
+//! device: when it changes (headphones plugged in, Bluetooth connected) or the
+//! stream fails, it is reopened before the next sound.
 
 use std::num::NonZero;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
-use rodio::{Decoder, MixerDeviceSink, Source};
+use rodio::cpal::DeviceId;
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 
 /// Longest custom tick kept, in seconds.
 const MAX_TICK_SECONDS: usize = 2;
+/// How often the default output device is compared with the open one.
+const DEVICE_CHECK: Duration = Duration::from_secs(2);
+
+struct Output {
+    sink: MixerDeviceSink,
+    device: Option<DeviceId>,
+}
 
 pub struct Audio {
-    sink: Option<MixerDeviceSink>,
+    output: Option<Output>,
+    /// Set by the stream's error callback; the stream is reopened before the next sound.
+    failed: Arc<AtomicBool>,
+    checked: Option<Instant>,
     tick: SamplesBuffer,
     custom_path: Option<String>,
 }
 
 impl Audio {
-    /// Open the default output device; without one, sound is silently disabled.
+    /// Open the default output device; without one, sound is skipped until one appears.
     pub fn new() -> Self {
-        let sink = rodio::DeviceSinkBuilder::open_default_sink()
-            .inspect_err(|e| log::warn!("no audio output: {e}"))
-            .ok()
-            .map(|mut s| {
-                s.log_on_drop(false);
-                s
-            });
-        Self {
-            sink,
+        let mut audio = Self {
+            output: None,
+            failed: Arc::new(AtomicBool::new(false)),
+            checked: None,
             tick: default_tick(),
             custom_path: None,
-        }
+        };
+        audio.ensure_output();
+        audio
     }
 
     /// Use the `.mp3` at `path`, or the bundled tick when `None` or unreadable.
@@ -44,11 +58,65 @@ impl Audio {
             .unwrap_or_else(default_tick);
     }
 
-    pub fn play_ticks(&self, count: u32, volume: f32) {
-        let Some(sink) = &self.sink else { return };
+    pub fn play_ticks(&mut self, count: u32, volume: f32) {
+        self.ensure_output();
+        let Some(output) = &self.output else { return };
         for _ in 0..count {
-            sink.mixer()
+            output
+                .sink
+                .mixer()
                 .add(self.tick.clone().amplify(volume.clamp(0.0, 1.0)));
+        }
+    }
+
+    /// The countdown alarm: three bursts of four short beeps.
+    pub fn play_alarm(&mut self, volume: f32) {
+        self.ensure_output();
+        if let Some(output) = &self.output {
+            output
+                .sink
+                .mixer()
+                .add(alarm().amplify(volume.clamp(0.0, 1.0)));
+        }
+    }
+
+    /// (Re)open the stream if it failed or the default device changed since the last check.
+    fn ensure_output(&mut self) {
+        let failed = self.failed.swap(false, Ordering::Relaxed);
+        let now = Instant::now();
+        if !failed && self.checked.is_some_and(|at| now - at < DEVICE_CHECK) {
+            return;
+        }
+        self.checked = Some(now);
+        let device = rodio::cpal::default_host().default_output_device();
+        let id = device.as_ref().and_then(|d| d.id().ok());
+        if !failed && id.is_some() && self.output.as_ref().is_some_and(|o| o.device == id) {
+            return;
+        }
+        // Drop the old stream before opening a new one on the same device.
+        let had_output = self.output.take().is_some();
+        let Some(device) = device else {
+            if had_output {
+                log::info!("audio output gone");
+            }
+            return;
+        };
+        let flag = self.failed.clone();
+        let sink = DeviceSinkBuilder::from_device(device)
+            .map(|b| {
+                b.with_error_callback(move |e| {
+                    log::warn!("audio stream error: {e}");
+                    flag.store(true, Ordering::Relaxed);
+                })
+            })
+            .and_then(|b| b.open_stream());
+        match sink {
+            Ok(mut sink) => {
+                sink.log_on_drop(false);
+                log::info!("audio output opened: {id:?}");
+                self.output = Some(Output { sink, device: id });
+            }
+            Err(e) => log::warn!("no audio output: {e}"),
         }
     }
 }
@@ -65,6 +133,35 @@ fn load_tick(path: &Path) -> Option<SamplesBuffer> {
     let max = MAX_TICK_SECONDS * rate.get() as usize * channels.get() as usize;
     let samples: Vec<f32> = decoder.take(max).collect();
     (!samples.is_empty()).then(|| SamplesBuffer::new(channels, rate, samples))
+}
+
+/// Three bursts of four 2 kHz beeps, about 2.2 s in all.
+fn alarm() -> SamplesBuffer {
+    const RATE: u32 = 48_000;
+    const BEEP: f32 = 0.08;
+    const BEEP_GAP: f32 = 0.07;
+    const BURST_GAP: f32 = 0.45;
+    let burst = 4.0 * (BEEP + BEEP_GAP);
+    let len = (RATE as f32 * 3.0 * (burst + BURST_GAP)) as usize;
+    let tau = std::f32::consts::TAU;
+    let samples: Vec<f32> = (0..len)
+        .map(|i| {
+            let t = (i as f32 / RATE as f32) % (burst + BURST_GAP);
+            let b = t % (BEEP + BEEP_GAP);
+            if t >= burst || b >= BEEP {
+                return 0.0;
+            }
+            // Short fades at both ends keep the beep free of clicks.
+            let envelope = (b.min(BEEP - b) / 0.004).min(1.0);
+            let tone = (tau * 2000.0 * b).sin() * 0.8 + (tau * 4000.0 * b).sin() * 0.2;
+            tone * envelope * 0.6
+        })
+        .collect();
+    SamplesBuffer::new(
+        NonZero::new(1).unwrap(),
+        NonZero::new(RATE).unwrap(),
+        samples,
+    )
 }
 
 /// A short mechanical click: a noise burst through two decaying resonances.

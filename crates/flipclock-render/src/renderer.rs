@@ -35,6 +35,8 @@ const MODE_BACKGROUND: f32 = 2.0;
 const PIN_COLOR: [f32; 3] = [0.10, 0.10, 0.11];
 const PIN_RADIUS: f32 = 0.008;
 const PIN_LENGTH: f32 = 0.018;
+/// Smallest gap between a text line and the window edges, in logical pixels.
+const TEXT_EDGE: f32 = 16.0;
 
 /// Everything about the look of the scene, in linear color.
 #[derive(Debug, Clone, PartialEq)]
@@ -789,7 +791,9 @@ impl Renderer {
 
         let date_draw = match (&self.date, date_layout) {
             (Some((texture, _)), Some(d)) => {
-                let (w, h) = (texture.width as f32, texture.height as f32);
+                // A line wider than the window (long countdown description) shrinks to fit.
+                let fit = ((width - 2.0 * TEXT_EDGE * sf) / texture.width as f32).clamp(0.1, 1.0);
+                let (w, h) = (texture.width as f32 * fit, texture.height as f32 * fit);
                 let ax = d.anchor_x * sf;
                 let x = match d.position {
                     DatePosition::Left => ax,

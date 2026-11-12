@@ -81,6 +81,8 @@ struct Tile {
     flip: Option<Flip>,
     pending_start: Option<f64>,
     test_flip: bool,
+    /// Reach the target in one flip instead of rolling through the sequence.
+    direct: bool,
 }
 
 impl Tile {
@@ -91,6 +93,7 @@ impl Tile {
             flip: None,
             pending_start: None,
             test_flip: false,
+            direct: false,
         }
     }
 
@@ -139,6 +142,17 @@ impl Motion {
     /// Set the digits the tiles must reach. Idle tiles that change start a cascade
     /// right to left; tiles already moving keep going towards the new target.
     pub fn set_target(&mut self, digits: [u8; TILE_COUNT], now: f64) {
+        self.retarget(digits, now, false);
+    }
+
+    /// Like [`set_target`](Self::set_target), but each changing tile reaches its
+    /// new digit in a single flip, whichever way it goes. Used by the countdown,
+    /// whose digits go down and whose hours tens go past 2.
+    pub fn set_target_direct(&mut self, digits: [u8; TILE_COUNT], now: f64) {
+        self.retarget(digits, now, true);
+    }
+
+    fn retarget(&mut self, digits: [u8; TILE_COUNT], now: f64, direct: bool) {
         let mut rank = 0.0;
         for i in (0..TILE_COUNT).rev() {
             let tile = &mut self.tiles[i];
@@ -146,6 +160,7 @@ impl Motion {
                 continue;
             }
             tile.target = digits[i];
+            tile.direct = direct;
             if tile.is_busy() {
                 continue;
             }
@@ -249,7 +264,11 @@ impl Motion {
 /// Start the next flip of a tile towards its target: intermediate flips of a roll
 /// are short and bounce-free, the final flip uses the configured duration and bounce.
 fn start_flip(index: usize, tile: &Tile, start: f64, settings: &MotionSettings) -> Flip {
-    let to = next_digit(index, tile.shown);
+    let to = if tile.direct {
+        tile.target
+    } else {
+        next_digit(index, tile.shown)
+    };
     let is_final = to == tile.target;
     Flip {
         to,
@@ -366,6 +385,26 @@ mod tests {
         ticks += run(&mut m, 0.151, 3.0);
         assert_eq!(m.shown()[5], 6);
         assert_eq!(ticks, 6, "one flip per digit from 0 to 6, none repeated");
+    }
+
+    #[test]
+    fn direct_targets_flip_once_even_going_down() {
+        let mut m = Motion::new([0, 0, 0, 1, 0, 0], SETTINGS);
+        m.set_target_direct([0, 0, 0, 0, 5, 9], 0.0);
+        assert_eq!(run(&mut m, 0.0, 2.0), 3, "one flip per changed tile");
+        assert_eq!(m.shown(), [0, 0, 0, 0, 5, 9]);
+    }
+
+    #[test]
+    fn direct_targets_reach_digits_outside_the_clock_sequence() {
+        let mut m = Motion::new(digits_of(12, 0, 0), SETTINGS);
+        m.set_target_direct([9, 9, 0, 0, 0, 0], 0.0);
+        assert_eq!(run(&mut m, 0.0, 2.0), 2);
+        assert_eq!(m.shown(), [9, 9, 0, 0, 0, 0]);
+        // Back to a time: hours tens 9 -> 1 is again a single flip.
+        m.set_target_direct(digits_of(12, 0, 0), 2.0);
+        assert_eq!(run(&mut m, 2.0, 4.0), 2);
+        assert_eq!(m.shown(), digits_of(12, 0, 0));
     }
 
     #[test]
