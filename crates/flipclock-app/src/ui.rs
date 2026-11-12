@@ -9,7 +9,7 @@ use flipclock_render::fonts::FontCatalog;
 
 use crate::strings::Strings;
 
-const PANEL_WIDTH: f32 = 340.0;
+pub const PANEL_WIDTH: f32 = 340.0;
 const COG_IDLE_SECONDS: f32 = 3.0;
 const COG_FADE_SECONDS: f32 = 0.4;
 const STANDARD_WEIGHTS: [u16; 9] = [100, 200, 300, 400, 500, 600, 700, 800, 900];
@@ -17,6 +17,8 @@ const STANDARD_WEIGHTS: [u16; 9] = [100, 200, 300, 400, 500, 600, 700, 800, 900]
 #[derive(Default)]
 pub struct UiState {
     pub panel_open: bool,
+    /// How far the panel is open, 0..=1, animated; the clock area shrinks by that share of the panel.
+    pub panel_fraction: f32,
     pub banner: Option<String>,
     confirm_reset: bool,
     weights: HashMap<String, Vec<u16>>,
@@ -116,7 +118,13 @@ fn panel(
     env: &UiEnv<'_>,
     out: &mut UiOutput,
 ) {
-    let t = ctx.animate_bool_with_time(Id::unique("panel-open"), state.panel_open, 0.22);
+    let t = ctx.animate_bool_with_time_and_easing(
+        Id::unique("panel-open"),
+        state.panel_open,
+        0.22,
+        egui::emath::easing::cubic_out,
+    );
+    state.panel_fraction = t;
     if t <= 0.0 {
         return;
     }

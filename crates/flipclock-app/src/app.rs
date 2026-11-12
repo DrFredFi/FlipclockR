@@ -585,18 +585,8 @@ impl App {
         }
         let scale = window.scale_factor();
         let logical = size.to_logical::<f32>(scale);
-        let c = &self.config;
-        let layout = layout::compute(&LayoutInput {
-            width: logical.width,
-            height: logical.height,
-            margin: c.layout.margin,
-            seconds_scale: c.clock.seconds_scale,
-            date_visible: c.date.visible,
-            date_size: c.date.size,
-            date_position: c.date.position,
-        });
 
-        // egui
+        // egui first: the settings panel's animated width decides the clock area.
         let raw = gfx.egui_state.take_egui_input(&window);
         let env = UiEnv {
             strings: self.strings,
@@ -637,6 +627,19 @@ impl App {
         self.egui_repaint_at = viewport_output
             .get(&egui::ViewportId::ROOT)
             .and_then(|v| Instant::now().checked_add(v.repaint_delay));
+
+        // The open settings panel pushes the clock left instead of covering it.
+        let c = &self.config;
+        let panel = ui::PANEL_WIDTH * self.ui.panel_fraction;
+        let layout = layout::compute(&LayoutInput {
+            width: (logical.width - panel).max(1.0),
+            height: logical.height,
+            margin: c.layout.margin,
+            seconds_scale: c.clock.seconds_scale,
+            date_visible: c.date.visible,
+            date_size: c.date.size,
+            date_position: c.date.position,
+        });
 
         // 3D scene, then egui on top
         let t = self.start.elapsed().as_secs_f64();
