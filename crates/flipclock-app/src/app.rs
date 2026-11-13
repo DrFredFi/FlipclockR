@@ -809,6 +809,13 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        // On X11 the window can already be bigger than the surface while a drag-resize is
+        // still running and its `Resized` event hasn't arrived yet. Sizing egui from that
+        // newer size puts its scissor rects outside the frame, and wgpu panics. Matching
+        // the surface to the size used for this frame keeps the two in step.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.renderer.resize(size.width, size.height);
+        }
         let scale = window.scale_factor();
         let logical = size.to_logical::<f32>(scale);
         let t = self.start.elapsed().as_secs_f64();
